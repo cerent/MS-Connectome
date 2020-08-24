@@ -1,0 +1,279 @@
+
+# data name
+data_used1
+
+# Use 10 cores for parallelization
+myCluster <- makeCluster(10)
+registerDoMC(10)
+
+# save the results in multiResultClass
+{multiResultClass <- function(result1=NULL,result2=NULL,result3=NULL,result4=NULL,
+                              result5=NULL,result6=NULL,result7=NULL,result8=NULL){me <- list(
+                                result1 = result1,
+                                result2 = result2,
+                                result3 = result3,
+                                result4 = result4,
+                                result5 = result5,
+                                result6 = result6,
+                                result7 = result7,
+                                result8 = result8)
+                              #Set the name for the class
+                              class(me) <- append(class(me),"multiResultClass")
+                              return(me)}
+  
+  OuterKfold<-5;InnerKfold<-5;InnerIterNumber<-10
+
+  ntree_interval<-seq(10,100,10)
+  mtry_interval<-list(seq(5,25,5),seq(5,100,5))
+  
+  predict_all_outer<-NULL;predict_all_connect_all_outer<-NULL;predict_all_ensemble_all_outer<-NULL
+  varImp_all_outer<-list();varImp_SC_FC_all_outer<-NULL;varImp_connect_all_outer<-NULL
+  auc_outer_outerloop<-NULL; outer_auc_connect_all_outer<-NULL; outer_auc_ensemble_all_outer<-NULL
+  best_hyper_outer<-NULL; best_hyper_connect_outer<-NULL; best_hyper_ensemble_outer<-NULL
+  best_threshold_all_outer<-NULL;best_threshold_all_connect_all_outer<-NULL;best_threshold_all_ensemble_all_outer<-NULL
+  result_ConfMatrix_outer<-NULL;result_ConfMatrix_outer_connect_all_outer<-NULL;result_ConfMatrix_outer_ensemble_all_outer<-NULL
+  err_cv_outer<-NULL;err_cv_connect_outer<-NULL;err_cv_ensemble_outer<-NULL
+  dim_data_outer<-NULL;result_ConfMatrix_outer1<-NULL
+}
+
+# start parallel (100 outerloop)
+resultsofparallel<-foreach(it=rep(1:10,10), 
+.combine = rbind,.multicombine=TRUE,.packages=c("nnet","rminer","caret","AUC","e1071","randomForest")) %dopar% {cat(paste("iter=",it),"\n")
+                         
+# start outerloop                                                                                                                                                                        
+for(outerloop in 1:OuterKfold){cat(paste("outerloop=",outerloop))
+  
+  # Split the data in 5 partitions
+  folds_outerloop<-createFolds(factor(as.data.frame(data_used1[[1]])$Output_class),k=OuterKfold,list = FALSE)  
+  
+  # start for each single model
+  for(model in 1:length(data_used1)){
+    data_used<-data_used1[[model]]
+    data_used<-as.data.frame(data_used)
+    names1<-names(data_used)
+    names(data_used)<-make.names(names1, unique = TRUE, allow_ = TRUE)
+    data_used$Output_class<-as.factor(data_used$Output_class) 
+    
+    # Create a train dataset using 4 partitions over 5                                                          
+    trainData <- data_used[folds_outerloop != outerloop, ]
+    
+    # Create a test dataset using 1 partition over 5                                                           
+    testData <- data_used[folds_outerloop == outerloop, ]
+    
+    err_cv<-NULL
+    
+    # Start inner loop ####
+    # Repeat CV 10 times for different partitions
+    for (iterinner in 1:InnerIterNumber) {
+      # cat(paste("iterinner=",iterinner))
+      
+      # Create partitions from train dataset
+      folds_outerloop_inner<-createFolds(factor(trainData$Output_class),k=InnerKfold,list = FALSE)
+      
+      for(innerloop in 1:InnerKfold){
+        
+        # create train and validation dataset to find the best hyperparameters
+        trainingData <- trainData[folds_outerloop_inner != innerloop, ]
+        validationData <- trainData[folds_outerloop_inner == innerloop, ]
+        
+        # Data normalization-standardization
+        normParam_training <- preProcess(trainingData,method = c("center", "scale"))
+        trainingData <- predict(normParam_training, trainingData)
+        validationData <- predict(normParam_training, validationData)
+        
+        # apply smote function to balance the data
+        smote_trainingData <- SMOTE(Output_class ~ ., trainingData, perc.over = 100)
+        smote_trainingData1<-na.omit(smote_trainingData)
+        
+        # use different mtry interval for different datasets
+        if (model==1) {
+          mtry_interval1<-mtry_interval[[1]]}
+        
+        if (model=1) {
+          mtry_interval1<-mtry_interval[[2]]}
+
+        
+        for (ntree in ntree_interval) {
+          for (mtry in mtry_interval1) {
+            
+            # Fit the model using a couple of the hyperparameters
+            innermodel_rf_prob<- randomForest(Output_class ~ .,  data = smote_trainingData1,mtry=mtry,
+                                              ntree=ntree,probability=TRUE,na.action=na.roughfix)
+            
+            # Predict the validation dataset
+            predict_validation_rf_prob<-predict(innermodel_rf_prob,validationData,type="prob")[,2]
+            # compute AUC
+            auc_inner <- ROSE::roc.curve(validationData$Output_class, predict_validation_rf_prob,plotit = FALSE)$auc
+            # create a matrix with couple of hyperparameters and auc
+            err_cv<-rbind(err_cv,c(iterinner,innerloop,ntree,mtry,auc_inner,model))
+            
+          }
+        }
+        
+      }
+      
+    }
+    err_cv_outer<-rbind(err_cv_outer,err_cv)
+    
+    # End inner loop ####
+    
+    # Find the Best hyperparameters that maximize AUC ####
+    param_median_auc<-NULL
+    for(ntreebest in levels(as.factor(err_cv[,3]))){
+      for(mtrybest in levels(as.factor(err_cv[,4]))){
+        row1<-which(err_cv[,3]==ntreebest)
+        row2<-which(err_cv[,4]==mtrybest)
+        param_median_auc<-rbind(param_median_auc,c(as.numeric(ntreebest),as.numeric(mtrybest),
+                                                   as.numeric(median(err_cv[intersect(row1,row2),5]))))
+      }
+    }
+    # Find the Best hyperparameters that maximize AUC ####
+    best_hyper<-c(param_median_auc[which.max(param_median_auc[,3]),1],
+                  param_median_auc[which.max(param_median_auc[,3]),2])
+    
+    best_hyper_outer<-rbind(best_hyper_outer,best_hyper)
+    
+    # Data normalization-standardization
+    normParam_train <- preProcess(trainData,method = c("center", "scale"))
+    trainData <- predict(normParam_train, trainData)
+    testData <- predict(normParam_train, testData)
+    
+    # SMOTE for train dataset ####
+    smote_trainData <- SMOTE(Output_class ~ ., trainData, perc.over = 100)
+    smote_trainData_new<-na.omit(smote_trainData)
+    
+    # fit the model for the train dataset with the best hyperparaeters
+    outermodel_rf_prob<- randomForest(Output_class ~ .,  data = smote_trainData_new,mtry=best_hyper[2],
+                                      ntree=best_hyper[1],probability=TRUE,na.action=na.roughfix,importance=TRUE, localImp=FALSE)
+    
+    # Predict the test dataset
+    predict_test_rf_prob<-predict(outermodel_rf_prob,testData,type="prob")[,2]
+    
+    ## variable importance ####
+    varImp_all_outer<-rbind(varImp_all_outer,
+                            cbind(as.matrix(importance(outermodel_rf_prob,type=1)),
+                                  as.matrix(importance(outermodel_rf_prob,type=2))))
+    
+    # combine predicted and observed outputs ####
+    predict_all_outer<-rbind(predict_all_outer,cbind(predict_test_rf_prob,
+                                                     as.numeric(as.character(testData$Output_class)),
+                                                     rep(model,length(predict_test_rf_prob)),
+                                                     rep(outerloop,length(predict_test_rf_prob))))   
+    
+    # compute AUC for test dataset
+    auc_outer <- ROSE::roc.curve(testData$Output_class, predict_test_rf_prob,plotit = FALSE)$auc
+    auc_outer_outerloop<-rbind(auc_outer_outerloop,c(auc_outer,model))
+  } ## end of the model loop
+  
+  # identify single models ####
+  predict_all_outer0<-predict_all_outer[which(predict_all_outer[,4]==outerloop),]
+  predict_all_outer1<-predict_all_outer0[which(predict_all_outer0[,3]==1),1] # demo
+  predict_all_outer2<-predict_all_outer0[which(predict_all_outer0[,3]==2),1] # SC
+  predict_all_outer3<-predict_all_outer0[which(predict_all_outer0[,3]==3),1] # sFC
+  predict_all_outer4<-predict_all_outer0[which(predict_all_outer0[,3]==4),1] # dFC 
+
+  # ens model 1 = SC +FC
+  pred_ensemble_outer1<-cbind(as.matrix(predict_all_outer2),as.matrix(predict_all_outer3))
+  mean_pred_ensemble_outer1<-rowMeans(pred_ensemble_outer1, dims = 1)
+  # ens model 2 = SC + dFC 
+  pred_ensemble_outer2<-cbind(as.matrix(predict_all_outer2),as.matrix(predict_all_outer4))
+  mean_pred_ensemble_outer2<-rowMeans(pred_ensemble_outer2, dims = 1)
+
+  # ens model 3 = FC + dFC 
+  pred_ensemble_outer3<-cbind(as.matrix(predict_all_outer3),as.matrix(predict_all_outer4))
+  mean_pred_ensemble_outer3<-rowMeans(pred_ensemble_outer3)
+
+  # ens model 4 = SC + FC + dFC 
+  pred_ensemble_outer4<-cbind(as.matrix(predict_all_outer2),as.matrix(predict_all_outer3),as.matrix(predict_all_outer4))
+  mean_pred_ensemble_outer4<-rowMeans(pred_ensemble_outer4, dims = 1)
+
+# create a matrix with all ensemble model predictions
+  mean_pred_ensemble_outer12345<-cbind(mean_pred_ensemble_outer1,mean_pred_ensemble_outer2,
+                                       mean_pred_ensemble_outer3,mean_pred_ensemble_outer4,
+                                       rep(model,length(testData$Output_class)),
+                                       rep(outerloop,length(testData$Output_class))
+  )
+  predict_all_ensemble_all_outer<-list(predict_all_ensemble_all_outer,mean_pred_ensemble_outer12345)
+  
+  # compute AUC for all ensemble models
+  auc_outer_ensemble12345<-NULL
+  for(ensembleno in 1:dim(mean_pred_ensemble_outer12345)[2]){
+    auc_outer_ensemble <- ROSE::roc.curve(testData$Output_class, mean_pred_ensemble_outer12345[,ensembleno],plotit = FALSE)$auc
+    auc_outer_ensemble12345<-rbind(auc_outer_ensemble12345,auc_outer_ensemble)
+  }
+  
+  # save auc results
+  outer_auc_ensemble_all_outer<-rbind(outer_auc_ensemble_all_outer,cbind(rep(iterinner,5),
+                                                                         rep(outerloop,5),
+                                                                         auc=auc_outer_ensemble12345,
+                                                                         rep(model,5)))
+  ######################## #
+  mean_pred_single_ensemble_outer12345<-cbind(as.matrix(predict_all_outer2),
+                                              as.matrix(predict_all_outer3),
+                                              as.matrix(predict_all_outer4),
+                                              mean_pred_ensemble_outer12345)
+  
+  # compute balanced accuracy, sensitivity, and specificity
+  for(i in 1:dim(mean_pred_single_ensemble_outer12345)[2]){
+    predict_test_rf_prob<-mean_pred_single_ensemble_outer12345[,i]
+    
+    # Find the best threshold to dichotomize the probability by maximizing the balanced accuracy ####
+    predict_output_threshold<-matrix(NA,ncol=1,nrow = length(testData$Output_class))
+    threshold_accuracy<-NULL
+    for(threshold in seq(0.1,0.9,0.1)){
+      for(k in 1:length(testData$Output_class)){
+        
+        if(predict_test_rf_prob[k]>=threshold)
+          predict_output_threshold[k]<-1
+        else
+          predict_output_threshold[k]<-0
+      } 
+      result_threshold <- confusionMatrix(as.factor(predict_output_threshold),testData$Output_class,positive="1")
+      Balanced_accuracy<-result_threshold$byClass['Balanced Accuracy']
+      threshold_accuracy<-rbind(threshold_accuracy,cbind(threshold=threshold,Balanced_accuracy=Balanced_accuracy))
+    }
+    best_threshold<-threshold_accuracy[which.max(threshold_accuracy[,"Balanced_accuracy"]),"threshold"]
+    best_threshold_all_outer<-rbind(best_threshold_all_outer,c(best_threshold),
+                                    threshold_accuracy[which.max(threshold_accuracy[,"Balanced_accuracy"]),"Balanced_accuracy"])
+    
+    # Dichotomize with the best threshold ###
+    threshold_predict_binary_final<-matrix(NA,ncol = 1,nrow =length(testData$Output_class))
+    for(k in 1:length(testData$Output_class)){
+      
+      if(predict_test_rf_prob[k]>=best_threshold)
+        threshold_predict_binary_final[k]<-1
+      else
+        threshold_predict_binary_final[k]<-0
+    } 
+    result_ConfMatrix<-confusionMatrix(as.factor(threshold_predict_binary_final),testData$Output_class,positive="1")
+    result_ConfMatrix_outer1<-rbind(result_ConfMatrix_outer1,
+                                    c(result_ConfMatrix$byClass[1:11],model=model,outer=outerloop))
+    # save all results (balanced accuracy, sensitivity and specificity for all outerloops)
+    result_ConfMatrix_outer<-cbind(result_ConfMatrix_outer,result_ConfMatrix)
+
+      }
+  # Save the dimensions of datasets to doublecheck the data used for the classification
+  dim_data<-c(dim(data_used)[1],
+              dim(data_used)[2],
+              length(which(data_used$Output_class==1)),
+              length(which(data_used$Output_class==0)),
+              length(which(testData$Output_class==1)),
+              length(which(testData$Output_class==0)),
+              length(which(trainData$Output_class==1)),
+              length(which(trainData$Output_class==0)))
+  dim_data_outer<-rbind(dim_data_outer,dim_data)
+} ## end of the outer loop
+
+# Save the classification results and variable importance in the same list
+result <- multiResultClass()
+result$result1 <- list(predict_all_outer,predict_all_ensemble_all_outer)
+result$result2 <- list(best_threshold_all_outer,best_threshold_all_ensemble_all_outer)
+result$result3 <- list(auc_outer_outerloop,outer_auc_ensemble_all_outer)
+result$result4 <- best_hyper_outer
+result$result5 <- list(result_ConfMatrix_outer,result_ConfMatrix_outer1)
+result$result6 <- dim_data_outer
+result$result7 <- err_cv_outer
+result$result8 <- varImp_all_outer
+return(result) 
+}
+

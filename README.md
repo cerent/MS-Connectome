@@ -1,4 +1,4 @@
-# MS-Connectome
+# MS-Connectivity-Disconnectivity
 
 We provided the linear regression with ridge regularization codes and library that are applicable on R version 3.4.4. The codes can be used for any two class problems.
 
